@@ -54,5 +54,5 @@ zd_grouped <- zd %>%
   summarise(geometry = st_union(geometry))
 
 val_zd <- left_join(val_merged, zd_grouped, by = c("ID_REFA_LDA" = "idrefa_lda"))
+st_write(val_zd,"val_zd.shp")
 
-print(val_zd, width = Inf)
