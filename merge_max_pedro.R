@@ -5,23 +5,10 @@ library(lubridate)
 library(sf)
 library(scales)
 
-#######################
-col_spec <- cols(.default = "c")
-
-val_2025_first <- read_csv2("data/validations-reseau-ferre-nombre-validations-par-jour-1er-trimestre.csv", col_types = col_spec)
-
-val_2025_first <- rename(val_2025_first, ID_REFA_LDA = ID_ZDC)
-val_explore <- val_2025_first
-
-zd <- st_read("data/REF_ZdA/PL_ZDL_R_11-11-2025.shp")
-
-zd <- zd |> mutate(across(-geometry, as.character))
-str(zd)
-
-val_explore <- val_explore |> mutate(day_of_week = wday(JOUR, label = T))
-val_explore$NB_VALD <- as.numeric(val_explore$NB_VALD)
 
 ###
+
+
 
 holidays <- as.Date(c(
     "2025-01-01", # Jour de l'An
