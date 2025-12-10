@@ -137,6 +137,25 @@ length(unique(zd_clean_only_val_stations$idrefa_lda))
 dim(val_merged_clean)
 dim(zd_clean_only_val_stations)
 
+
+
+# unifying the types of CATEGORIE_TITRE PAG. 21 from Données de validation télébilléttiques
+val_merged_clean <- val_merged_clean %>% mutate(CATEGORIE_TITRE = if_else(CATEGORIE_TITRE == "Imagine R", "IMAGINE R", CATEGORIE_TITRE))
+val_merged_clean <- val_merged_clean %>% mutate(CATEGORIE_TITRE = if_else(CATEGORIE_TITRE == "NAVIGO JOUR", "NAVIGO", CATEGORIE_TITRE))
+val_merged_clean <- val_merged_clean %>% mutate(CATEGORIE_TITRE = if_else(CATEGORIE_TITRE == "Amethyste", "AMETHYSTE", CATEGORIE_TITRE))
+val_merged_clean <- val_merged_clean %>%
+  mutate(CATEGORIE_TITRE = if_else(CATEGORIE_TITRE %in% c("Contrat Solidarité Transport", "Contrat Solidarit\xe9 Transport" ), "TST", CATEGORIE_TITRE))
+val_merged_clean <- val_merged_clean %>%
+  mutate(CATEGORIE_TITRE = if_else(CATEGORIE_TITRE %in% c("Forfait Navigo",   "Forfaits courts" ), "FGT", CATEGORIE_TITRE))
+val_merged_clean <- val_merged_clean %>%
+  mutate(CATEGORIE_TITRE = if_else(CATEGORIE_TITRE == "Autres titres", "AUTRE TITRE", CATEGORIE_TITRE))
+val_merged_clean <- val_merged_clean %>%
+  mutate(CATEGORIE_TITRE = if_else(CATEGORIE_TITRE == "?", "NON DEFINI", CATEGORIE_TITRE))
+
+dim(val_merged_clean)
+table(val_merged_clean$CATEGORIE_TITRE)
+
+
 write_parquet(val_merged_clean, "validations.parquet")
 st_write(zd_clean_only_val_stations, "zd.shp")
 
