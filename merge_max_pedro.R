@@ -4,11 +4,7 @@ library(ggplot2)
 library(lubridate)
 library(sf)
 library(scales)
-
-
-###
-
-
+library(arrow)
 
 holidays <- as.Date(c(
     "2025-01-01", # Jour de l'An
@@ -23,20 +19,20 @@ holidays <- as.Date(c(
     "2025-11-11", # Armistice
     "2025-12-25" # Noël
 ))
+holidays_md <- format(holidays, "%m-%d")
 
+validations = read_parquet("validations.parquet")
 
-val_explore <- val_explore %>%
-    mutate(
-        is_holiday = JOUR %in% holidays,
-        is_holiday = ifelse(is_holiday, "Holiday", "Normal Day")
-    )
+tot_val_per_day <- validations |>
+  group_by(JOUR) |>
+  summarise(NB_VALD=sum(NB_VALD), is_holiday=first(is_holiday))
 
-avg_vals <- val_explore %>%
+avg_vals <- tot_val_per_day %>%
     group_by(is_holiday) %>%
     summarise(mean_val = mean(NB_VALD, na.rm = TRUE))
 
 
-ggplot(val_explore, aes(x = is_holiday, y = NB_VALD, fill = is_holiday)) +
+ggplot(tot_val_per_day, aes(x = is_holiday, y = NB_VALD, fill = is_holiday)) +
     geom_boxplot(show.legend = FALSE) +
     labs(
         title = "Validation Distribution: Holidays vs Normal Days",
@@ -47,10 +43,13 @@ ggplot(val_explore, aes(x = is_holiday, y = NB_VALD, fill = is_holiday)) +
 
 ##############################################
 ######## Validations by type of pass
+daily_totals <- validations %>%
+  group_by(JOUR, day_of_week, CATEGORIE_TITRE) %>%
+  summarise(total_val = sum(NB_VALD, na.rm = TRUE), .groups = "drop")
 
-val_summary <- val_explore %>%
-    group_by(day_of_week, CATEGORIE_TITRE) %>%
-    summarise(mean_val = mean(NB_VALD, na.rm = TRUE))
+val_summary <- daily_totals %>%
+  group_by(day_of_week, CATEGORIE_TITRE) %>%
+  summarise(mean_val = mean(total_val, na.rm = TRUE), .groups = "drop")
 
 ggplot(val_summary, aes(x = day_of_week, y = mean_val, fill = CATEGORIE_TITRE)) +
     geom_col(position = "dodge") +
@@ -63,25 +62,30 @@ ggplot(val_summary, aes(x = day_of_week, y = mean_val, fill = CATEGORIE_TITRE)) 
     theme_minimal()
 
 #################################################
+########### Validations by weekday and type d'arret
 
+zd = st_read("zd.shp")
+zd <- zd %>%
+  mutate(
+    idrefa_lda = as.character(idrefa_lda),
+    idrefa_lda = sub("\\.0$", "", idrefa_lda)   # correct order
+  )
+  
 zd_lookup <- zd %>%
-    st_drop_geometry() %>%
-    select(idrefa_lda, type_arret) %>%
-    mutate(
-        join_id = as.numeric(idrefa_lda)
-    ) %>%
-    distinct(join_id, .keep_all = TRUE)
+  st_drop_geometry() %>%
+  select(idrefa_lda, type_arret) %>%
+  distinct(idrefa_lda, .keep_all = TRUE)
 
-val_explore_clean <- val_explore %>%
-    mutate(
-        join_id = as.numeric(ID_REFA_LDA)
-    )
+val_joined_final <- validations |> 
+  left_join(zd_lookup, by = c("ID_REFA_LDA" = "idrefa_lda"))
 
-val_joined_final <- inner_join(val_explore_clean, zd_lookup, by = "join_id")
+daily_totals <- val_joined_final %>%
+  group_by(JOUR, day_of_week, type_arret) %>%
+  summarise(total_val = sum(NB_VALD, na.rm = TRUE), .groups = "drop")
 
-val_summary <- val_joined_final %>%
+val_summary <- daily_totals %>%
     group_by(day_of_week, type_arret) %>%
-    summarise(mean_val = mean(NB_VALD, na.rm = TRUE), .groups = "drop")
+    summarise(mean_val = mean(total_val, na.rm = TRUE), .groups = "drop")
 
 ggplot(val_summary, aes(x = day_of_week, y = mean_val, fill = type_arret)) +
     geom_col(position = position_dodge(width = 0.8), width = 0.7) +
@@ -92,14 +96,19 @@ ggplot(val_summary, aes(x = day_of_week, y = mean_val, fill = type_arret)) +
 ###############################
 # BUSIEST WEEK DAY
 
-weekday_stats <- val_explore %>%
-    filter(is_holiday == "Normal Day") %>%
-    group_by(day_of_week) %>%
-    summarise(
-        avg_daily_val = mean(NB_VALD, na.rm = TRUE),
-        total_val = sum(NB_VALD, na.rm = TRUE)
-    ) %>%
-    arrange(desc(avg_daily_val))
+weekday_stats <- validations %>%
+  filter(is_holiday == "Normal Day") %>%
+  # sum per day first
+  group_by(JOUR, day_of_week) %>%
+  summarise(daily_total = sum(NB_VALD, na.rm = TRUE), .groups = "drop") %>%
+  # then average across weekdays
+  group_by(day_of_week) %>%
+  summarise(
+    avg_daily_val = mean(daily_total, na.rm = TRUE),
+    total_val = sum(daily_total, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(avg_daily_val))
 
 ggplot(weekday_stats, aes(x = reorder(day_of_week, -avg_daily_val), y = avg_daily_val)) +
     geom_col(fill = "darkblue") +
@@ -114,165 +123,249 @@ ggplot(weekday_stats, aes(x = reorder(day_of_week, -avg_daily_val), y = avg_dail
     theme_minimal()
 
 # more general stats
-Total_Ridership <- sum(val_explore$NB_VALD, na.rm = TRUE)
+Total_Ridership <- sum(validations$NB_VALD, na.rm = TRUE)
 Total_Ridership
-Total_Active_Stations <- n_distinct(val_explore$LIBELLE_ARRET)
+Total_Active_Stations <- n_distinct(validations$LIBELLE_ARRET)
 Total_Active_Stations
-Total_Days_Recorded <- n_distinct(val_explore$JOUR)
+Total_Days_Recorded <- n_distinct(validations$JOUR)
 Total_Days_Recorded
-Global_Daily_Avg <- sum(val_explore$NB_VALD, na.rm = TRUE) / n_distinct(val_explore$JOUR)
+Global_Daily_Avg <- sum(validations$NB_VALD, na.rm = TRUE) / n_distinct(validations$JOUR)
 Global_Daily_Avg
-Global_Median_Daily <- median(val_explore$NB_VALD, na.rm = TRUE)
-Global_Median_Daily
+daily_totals <- validations %>%
+  group_by(JOUR) %>%
+  summarise(daily_total = sum(NB_VALD, na.rm = TRUE), .groups = "drop")
 
+# median across days
+Global_Median_Daily <- median(daily_totals$daily_total, na.rm = TRUE)
+Global_Median_Daily
 #####################################################################
 ############### 1. GEOGRAPHICAL MAP - Average Validations ###########
 #####################################################################
 
-val_explore <- val_2025_first |>
-    mutate(
-        JOUR = parse_date_time(JOUR, orders = c("ymd", "mdy", "dmy")),
-        NB_VALD = as.numeric(NB_VALD)
-    ) |>
-    na.omit()
+daily_validations <- validations %>%
+  group_by(ID_REFA_LDA, JOUR) %>%
+  summarise(daily_val = sum(NB_VALD, na.rm = TRUE), .groups = "drop")
 
-avg_validations_zone <- val_explore |>
-    group_by(ID_REFA_LDA, LIBELLE_ARRET) |>
-    summarise(avg_validations = mean(NB_VALD, na.rm = TRUE), .groups = "drop") |>
-    mutate(ID_REFA_LDA = as.character(as.integer(as.numeric(ID_REFA_LDA))))
+# Step 2: Compute average per station over days
+avg_validations_zone <- daily_validations %>%
+  group_by(ID_REFA_LDA) %>%
+  summarise(avg_validations = mean(daily_val, na.rm = TRUE), .groups = "drop")
 
-zd_with_ids <- zd |>
-    mutate(idrefa_lda_clean = as.character(as.integer(as.numeric(idrefa_lda))))
-
-zd_with_validation <- left_join(zd_with_ids, avg_validations_zone,
-    by = c("idrefa_lda_clean" = "ID_REFA_LDA")
+zd_with_validation <- left_join(
+  zd,
+  avg_validations_zone,
+  by = c("idrefa_lda" = "ID_REFA_LDA")
 )
 
-# Filter to only zones with data
-zd_filtered <- zd_with_validation |>
-    filter(!is.na(avg_validations))
+zd_filtered <- zd_with_validation %>%
+  filter(!is.na(avg_validations))
 
 cat("\n=== Data for visualization ===\n")
 cat("Zones with validation data:", nrow(zd_filtered), "\n")
 
-# LLM solution to get hex grid grouping otherwise celles too small
+# Step 6: Create hex grid
 hex_grid_geom <- st_make_grid(zd_filtered, cellsize = c(2000, 2000), what = "polygons", square = FALSE)
 hex_grid <- st_sf(hex_id = 1:length(hex_grid_geom), geometry = hex_grid_geom)
 
-hex_validation <- st_join(hex_grid, zd_filtered) |>
-    group_by(hex_id) |>
-    summarise(
-        avg_validations = mean(avg_validations, na.rm = TRUE),
-        total_validations = sum(avg_validations, na.rm = TRUE),
-        n_stations = sum(!is.na(avg_validations)),
-        .groups = "drop"
-    ) |>
-    filter(n_stations > 0)
+# Step 7: Join stations to hex grid and aggregate
+hex_validation <- st_join(hex_grid, zd_filtered) %>%
+  group_by(hex_id) %>%
+  summarise(
+    avg_validations = mean(avg_validations, na.rm = TRUE),
+    total_validations = sum(avg_validations, na.rm = TRUE),
+    n_stations = sum(!is.na(avg_validations)),
+    .groups = "drop"
+  ) %>%
+  filter(n_stations > 0)
 
 cat("Hex cells with data:", nrow(hex_validation), "\n")
 
+# Step 8: Plot
 map_plot <- ggplot() +
-    geom_sf(
-        data = hex_validation, aes(fill = avg_validations),
-        color = NA, alpha = 0.7
-    ) +
-    scale_fill_viridis_c(
-        option = "plasma",
-        name = "Avg Validations\n(Area)",
-        labels = comma,
-        trans = "log10",
-        breaks = c(10, 100, 1000, 10000),
-        guide = guide_colorbar(order = 1)
-    ) +
-    labs(
-        title = "Average Daily Validations - Paris Transit Network (Q1 2025)",
-        subtitle = "Hexagonal heatmap for grouping (2km cells)"
-    ) +
-    theme_void() +
-    theme(
-        plot.title = element_text(face = "bold", size = 16, hjust = 0.5, margin = margin(b = 5)),
-        plot.subtitle = element_text(size = 11, hjust = 0.5, color = "grey40", margin = margin(b = 10)),
-        legend.position = "right",
-        legend.title = element_text(size = 10, face = "bold"),
-        legend.text = element_text(size = 8),
-        plot.margin = margin(15, 15, 15, 15),
-        plot.background = element_rect(fill = "white", color = NA)
-    )
-
-print(map_plot)
-ggsave("map_avg_validations.png", map_plot, width = 10, height = 8, dpi = 300)
+  geom_sf(data = hex_validation, aes(fill = avg_validations), color = NA, alpha = 0.7) +
+  scale_fill_viridis_c(
+    option = "plasma",
+    name = "Avg Validations\n(Area)",
+    labels = comma,
+    trans = "log10",
+    breaks = c(10, 100, 1000, 10000),
+    guide = guide_colorbar(order = 1)
+  ) +
+  labs(
+    title = "Average Daily Validations - Paris Transit Network (Q1 2025)",
+    subtitle = "Hexagonal heatmap for grouping (2km cells)"
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5, margin = margin(b = 5)),
+    plot.subtitle = element_text(size = 11, hjust = 0.5, color = "grey40", margin = margin(b = 10)),
+    legend.position = "right",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text = element_text(size = 8),
+    plot.margin = margin(15, 15, 15, 15),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+map_plot
 
 #####################################################################
 ############### 2. TIME EVOLUTION - Line Plot #######################
 #####################################################################
+weekly_validations <- validations %>%
+  group_by(week = floor_date(JOUR, unit = "week")) %>%
+  summarise(
+    total_validations = sum(NB_VALD, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # remove first and last week
+  filter(week != min(week) & week != max(week))
 
-daily_validations <- val_explore |>
-    group_by(JOUR) |>
-    summarise(total_validations = sum(NB_VALD, na.rm = TRUE)) |>
-    arrange(JOUR)
-
-daily_validations <- daily_validations |>
-    mutate(
-        day_of_week = wday(JOUR, label = TRUE),
-        is_weekend = wday(JOUR) %in% c(1, 7) # Sunday=1, Saturday=7
-    )
-
-print(head(daily_validations, 20))
-
-time_plot <- ggplot(daily_validations, aes(x = JOUR, y = total_validations)) +
-    geom_line(color = "#2C3E50", linewidth = 0.8) +
-    geom_point(aes(color = is_weekend), size = 2.5) +
-    scale_y_continuous(labels = comma) +
-    scale_color_manual(
-        values = c("FALSE" = "#3498DB", "TRUE" = "#E74C3C"),
-        labels = c("FALSE" = "Weekday", "TRUE" = "Weekend"),
-        name = "Day Type"
-    ) +
-    labs(
-        title = "Time Evolution of Daily Validations (Q1 2025)",
-        subtitle = "Weekends shown in red, weekdays in blue",
-        x = "Date",
-        y = "Total Daily Validations"
-    ) +
-    theme_minimal() +
-    theme(
-        plot.title = element_text(face = "bold", size = 14),
-        axis.text.x = element_text(angle = 45, hjust = 1),
-        legend.position = "right"
-    )
-
-print(time_plot)
-ggsave("time_evolution_validations.png", time_plot, width = 12, height = 6, dpi = 300)
+ggplot(weekly_validations, aes(x = week, y = total_validations)) +
+  geom_line(color = "#2C3E50", linewidth = 0.8) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "Weekly Total Validations",
+    x = "Week",
+    y = "Total Validations"
+  ) +
+  theme_minimal()
 
 #####################################################################
 ############### 3. DISTRIBUTION per Station/Zone ####################
 #####################################################################
 
-station_avg_validations <- val_explore |>
-    group_by(ID_REFA_LDA, LIBELLE_ARRET) |>
-    summarise(avg_daily_validations = mean(NB_VALD, na.rm = TRUE), .groups = "drop") |>
-    arrange(desc(avg_daily_validations))
+# Step 1: Sum validations per station per day
+daily_station_vals <- validations %>%
+  group_by(ID_REFA_LDA, JOUR) %>%
+  summarise(daily_val = sum(NB_VALD, na.rm = TRUE), .groups = "drop")
 
-top_stations <- station_avg_validations |>
-    top_n(30, avg_daily_validations)
+# Step 2: Compute average daily validations per station
+station_avg_validations <- daily_station_vals %>%
+  group_by(ID_REFA_LDA) %>%
+  summarise(avg_daily_validations = mean(daily_val, na.rm = TRUE), .groups = "drop") %>%
+  # Join with zd to get station names
+  left_join(
+    zd %>% st_drop_geometry() %>% 
+      select(ID_REFA_LDA = idrefa_lda, nom_lda) %>% 
+      distinct(ID_REFA_LDA, .keep_all = TRUE), 
+    by = "ID_REFA_LDA"
+  ) %>%
+  arrange(desc(avg_daily_validations))
 
+# Step 3: Keep top 30 stations
+top_stations <- station_avg_validations %>%
+  slice_max(avg_daily_validations, n = 30) %>%
+  # remove any remaining duplicates (just in case)
+  distinct(ID_REFA_LDA, .keep_all = TRUE)
+
+# Step 4: Plot with descending order
 dist_plot <- ggplot(top_stations, aes(
-    x = reorder(LIBELLE_ARRET, avg_daily_validations),
-    y = avg_daily_validations
+  x = reorder(nom_lda, avg_daily_validations),  # reorder by avg daily validations
+  y = avg_daily_validations
 )) +
-    geom_col(fill = "#3498DB") +
-    scale_y_continuous(labels = comma) +
-    labs(
-        title = "Top 30 Stations by Average Daily Validations (Q1 2025)",
-        x = "Station Name",
-        y = "Average Daily Validations"
-    ) +
-    coord_flip() +
-    theme_minimal() +
-    theme(
-        plot.title = element_text(face = "bold", size = 14),
-        axis.text.y = element_text(size = 9)
-    )
+  geom_col(fill = "#3498DB") +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Top 30 Stations by Average Daily Validations",
+    x = "Station Name",
+    y = "Average Daily Validations"
+  ) +
+  coord_flip() +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text.y = element_text(size = 9)
+  )
+dist_plot
 
-print(dist_plot)
-ggsave("distribution_validations.png", dist_plot, width = 10, height = 10, dpi = 300)
+###############################################################
+####
+
+# group per year and season
+df_season <- validations %>%
+  mutate(
+    date  = as.Date(JOUR),
+    year  = year(date),
+    md    = month(date) * 100 + day(date),  
+    season = case_when(
+      md >= 322  & md < 621  ~ "Spring", # 22/03 to 20/06
+      md >= 621  & md < 923  ~ "Summer",     # 21/06 to 22/09
+      md >= 923  & md < 1222 ~ "Fall",    # 23/09 to 21/12
+      TRUE                    ~ "Winter"   # 22/12 to 21/03
+    )
+  ) %>%
+  group_by(year, season) %>%
+  summarise(NB_VALD = sum(NB_VALD, na.rm = TRUE), .groups = "drop") %>%
+  mutate(
+    season = factor(season, levels = c("Spring","Summer","Fall","Winter"))
+  )
+
+head(df_season)
+
+df_mean_year <- df_season %>%
+  group_by(year) %>%
+  summarise(mean_year = mean(NB_VALD, na.rm = TRUE), .groups = "drop")
+
+
+ggplot(df_season, aes(x = factor(year), y = NB_VALD, fill = season)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_line(
+    data = df_mean_year,
+    aes(x = factor(year), y = mean_year, group = 1),
+    inherit.aes = FALSE,
+    linewidth = 1
+  ) +
+  geom_point(
+    data = df_mean_year,
+    aes(x = factor(year), y = mean_year),
+    inherit.aes = FALSE,
+    size = 2
+  ) +
+  labs(
+    x = "Year",
+    y = "Total validation (NB_VALD)",
+    fill = "Season",
+    title = "Validations per year per season + annual mean"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# validation per month
+df_month <- validations %>%   
+  mutate(
+    date = as.Date(JOUR),
+    year_month = floor_date(date, unit = "month")  
+  ) %>%
+  group_by(year_month) %>%
+  summarise(
+    NB_VALD = sum(NB_VALD, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+
+# covid 
+mean_val <- mean(df_month$NB_VALD, na.rm = TRUE)
+
+# 
+covid_start <- as.Date("2020-03-01")
+covid_end   <- as.Date("2022-06-30")
+
+ggplot(df_month, aes(x = year_month, y = NB_VALD)) +
+  # shadows  
+  geom_rect(aes(xmin = covid_start, xmax = covid_end,
+                ymin = -Inf, ymax = Inf),
+            inherit.aes = FALSE, alpha = 0.2) +
+  # validations area
+  geom_area( fill  ="#3498DB",  alpha = 0.5) +
+  # mean
+  geom_hline(yintercept = mean_val, linetype = "dashed", linewidth = 0.8) +
+  
+  labs(
+    x = "Month",
+    y = "Validations (NB_VALD)",
+    title = "Validations per Month",
+    subtitle = "Shadows = COVID; dashed = mean"
+  ) +
+  theme_classic()
+
