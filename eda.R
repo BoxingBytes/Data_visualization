@@ -5,6 +5,7 @@ library(lubridate)
 library(sf)
 library(scales)
 library(arrow)
+library(zoo)
 
 holidays <- as.Date(c(
     "2025-01-01", # Jour de l'An
@@ -138,6 +139,7 @@ daily_totals <- validations %>%
 # median across days
 Global_Median_Daily <- median(daily_totals$daily_total, na.rm = TRUE)
 Global_Median_Daily
+
 #####################################################################
 ############### 1. GEOGRAPHICAL MAP - Average Validations ###########
 #####################################################################
@@ -219,11 +221,48 @@ weekly_validations <- validations %>%
   # remove first and last week
   filter(week != min(week) & week != max(week))
 
+# define summer breaks (start and end dates) for Zone C
+summer_breaks <- data.frame(
+  start = as.Date(c("2018-07-06", "2019-07-06", "2020-07-04", "2021-07-03", "2022-07-07", "2023-07-08", "2024-07-06")),
+  end   = as.Date(c("2018-09-02", "2019-09-02", "2020-09-01", "2021-09-02", "2022-09-01", "2023-09-04", "2024-09-02"))
+)
+
+
+# define holiday weeks (approx week-start dates)
+holiday_dates <- as.Date(c(
+  "2018-10-20","2019-10-19","2020-10-17","2021-10-23","2022-10-22","2023-10-21",  # Toussaint
+  "2018-12-22","2019-12-21","2020-12-19","2021-12-18","2022-12-17","2023-12-23",  # Christmas / New‑Year
+  "2019-02-23","2020-02-08","2021-02-13","2022-02-19","2023-02-18","2024-02-10",  # Winter break (Zone C)
+  "2019-04-20","2020-04-04","2021-04-17","2022-04-23","2023-04-22","2024-04-06"   # Spring break (Zone C)
+))
+
+# interpolate weekly totals to get approximate value for holiday date
+# first create a daily series using na.approx
+all_dates <- data.frame(date = seq(min(weekly_validations$week), max(weekly_validations$week), by = "day"))
+all_dates <- all_dates %>%
+  left_join(weekly_validations %>% rename(date = week), by = "date") %>%
+  arrange(date) %>%
+  mutate(total_validations = zoo::na.approx(total_validations, na.rm = FALSE))
+
+# get holiday points
+holiday_points <- all_dates %>%
+  filter(date %in% holiday_dates)
+
 ggplot(weekly_validations, aes(x = week, y = total_validations)) +
+  # summer break rectangles
+  geom_rect(data = summer_breaks,
+            inherit.aes = FALSE,
+            aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf),
+            fill = "lightblue", alpha = 0.2) +
+  # main line
   geom_line(color = "#2C3E50", linewidth = 0.8) +
+  # holiday points at actual dates
+  geom_point(data = holiday_points,
+             aes(x = date, y = total_validations),
+             color = "red", size = 3) +
   scale_y_continuous(labels = comma) +
   labs(
-    title = "Weekly Total Validations",
+    title = "Weekly Total Validations (with Summer & Holiday Highlights)",
     x = "Week",
     y = "Total Validations"
   ) +
