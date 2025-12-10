@@ -1,2 +1,5 @@
 data/*
 .Rproj.user/*
+.Rproj.user
+.RDataTmp
+.Rhistory
