@@ -4,6 +4,7 @@ library(ggplot2)
 library(lubridate )
 library(sf)
 library(arrow)
+library(sfarrow)
 
 
 
@@ -101,3 +102,45 @@ length(zd_clean$idrefa_lda)
 zd_clean_only_val_stations = zd_clean |> filter(idrefa_lda %in% unique_lda)
 
 dim(zd_clean_only_val_stations)
+
+
+
+str(zd_clean_only_val_stations)
+
+#
+length(unique(val_merged_cast$ID_REFA_LDA))
+length(unique(zd_clean_only_val_stations$idrefa_lda))
+
+# elements that are in the first and not in the second
+diff = setdiff(unique(val_merged_cast$ID_REFA_LDA), unique(zd_clean_only_val_stations$idrefa_lda))
+diff
+
+# find the diff at the original ZD
+zd_missing_rows <- zd %>% filter(idrefa_lda %in% diff)
+zd_missing_rows
+
+dim(zd_missing_rows)
+
+#could we just remove the missing zd_missing_rows from the merged dataset, as we doent need 
+
+# Find IDs in val_merged_cast that are NOT in the reference dataset
+ids_to_remove <- setdiff(unique(val_merged_cast$ID_REFA_LDA), 
+                         unique(zd_clean_only_val_stations$idrefa_lda))
+
+# Keep rows where ID is NOT (!) in the removal list
+val_merged_clean <- val_merged_cast[ !val_merged_cast$ID_REFA_LDA %in% ids_to_remove, ]
+
+
+length(unique(val_merged_clean$ID_REFA_LDA))
+length(unique(zd_clean_only_val_stations$idrefa_lda))
+
+dim(val_merged_clean)
+dim(zd_clean_only_val_stations)
+
+write_parquet(val_merged_clean, "validations.parquet")
+st_write(zd_clean_only_val_stations, "zd.shp")
+
+
+
+
+
