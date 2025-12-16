@@ -1,0 +1,889 @@
+---
+title: "Analyzing and Visualizing Ridership Patterns in Île-de-France Rail Network"
+subtitle: "A Comprehensive Analysis of Railway Station Usage (2018-2025)"
+author: "MOURA Pedro, DUCHINSKI Marcos, AGUIRRE Max"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-summary: "Show code"
+    theme: cosmo
+    highlight-style: github
+    fig-width: 10
+    fig-height: 6
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  echo: true
+---
+
+# Summary
+
+This report presents a comprehensive analysis of ridership patterns across the Île-de-France railway network from 2018 to 2024. Our analysis reveals significant variations in ridership patterns influenced by seasonal factors, holidays, and the COVID-19 pandemic. We have developed an interactive Shiny dashboard to monitor ridership against a standard "normal" week and identify seasonal patterns. 
+
+**Key Findings:**
+
+- Big seasonal patterns following holidays and summer breaks
+- Weekday ridership significantly higher than weekend ridership
+- COVID-19 pandemic resulted in a ~90%+ reduction in ridership during lockdown periods
+- Gradual recovery to pre-pandemic levels observed from mid-2022 onwards
+
+---
+
+# 1. Data Collection and Cleaning
+
+## 1.1 Data Sources
+
+We used the data available on île de france mobilité.
+
+- **Validation data**: Daily ridership counts per station from 2018-2025
+- **Geographic data**: Geographic locations and characteristics of all "Zone d'arrêt"
+
+```{r setup}
+#| label: setup
+#| include: false
+
+# Load required libraries
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(sf)
+library(scales)
+library(arrow)
+library(zoo)
+library(knitr)
+library(kableExtra)
+
+# Set global theme for plots
+theme_set(theme_minimal())
+```
+
+## 1.2 Data Loading and Initial Processing
+
+The cleaning process involves several critical steps to ensure data quality and consistency:
+
+```{r load-data}
+#| label: load-data
+#| code-fold: false
+
+# Load cleaned validation data
+validations <- read_parquet("validations.parquet")
+
+# Load station geographic data
+zd <- st_read("zd.shp", quiet = TRUE)
+
+# Display data structure
+cat("Dataset dimensions:", nrow(validations), "rows ×", ncol(validations), "columns\n")
+cat("Date range:", as.character(min(validations$JOUR)), "to", as.character(max(validations$JOUR)), "\n")
+cat("Number of unique stations:", n_distinct(validations$ID_REFA_LDA), "\n")
+```
+
+### Data Cleaning Steps
+
+The complete cleaning process (see `cleaning.R`) includes:
+
+1. **Consolidating multiple data files**: Merging multiple separate semester files from 2018-2024
+2. **Standardizing column names**: Harmonizing different naming conventions across years
+3. **Date parsing**: Converting multiple date formats to a unified `Date` type
+4. **Removing incomplete records**: Filtering out rows with missing critical values
+5. **Standardizing ticket categories**: Unifying ticket type labels (e.g., "Imagine R" → "IMAGINE R")
+6. **Geographic matching**: Ensuring all validation records correspond to valid station locations
+7. **Aggregating data**: Grouping by station, date, and ticket category
+8. **Additional shiny processing**: Additional pre-processing before deploying the application to remove as much load as possible on the memory
+
+```{r data-cleaning-summary}
+#| label: data-cleaning-summary
+
+# Summary of ticket categories after standardization
+ticket_summary <- validations %>%
+  group_by(CATEGORIE_TITRE) %>%
+  summarise(
+    `Total Validations` = sum(NB_VALD, na.rm = TRUE),
+    `% of Total` = round(sum(NB_VALD, na.rm = TRUE) / sum(validations$NB_VALD) * 100, 2)
+  ) %>%
+  arrange(desc(`Total Validations`))
+
+kable(ticket_summary, 
+      caption = "Distribution of Validations by Ticket Category",
+      format.args = list(big.mark = ",")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+## 1.3 Holiday Definition
+
+To properly identify patterns, we define French public holidays:
+
+```{r holidays}
+#| label: define-holidays
+
+# Define French public holidays
+holidays <- as.Date(c(
+    "2025-01-01", # Jour de l'An
+    "2025-04-21", # Lundi de Pâques
+    "2025-05-01", # Fête du Travail
+    "2025-05-08", # Armistice
+    "2025-05-29", # Ascension
+    "2025-06-09", # Lundi de Pentecôte
+    "2025-07-14", # Fête Nationale
+    "2025-08-15", # Assomption
+    "2025-11-01", # Toussaint
+    "2025-11-11", # Armistice
+    "2025-12-25" # Noël
+))
+holidays_md <- format(holidays, "%m-%d")
+
+# Add holiday indicator to validation data
+validations <- validations %>%
+  mutate(
+    JOUR = as.Date(JOUR),
+    day_of_week = weekdays(JOUR),
+    is_holiday = ifelse(JOUR %in% holidays, "Holiday", "Normal Day")
+  )
+```
+
+---
+
+# 2. Exploratory Data Analysis
+
+## 2.1 Overall Ridership Statistics
+
+```{r overall-stats}
+#| label: overall-statistics
+
+# Calculate key statistics
+total_ridership <- sum(validations$NB_VALD, na.rm = TRUE)
+total_stations <- n_distinct(validations$ID_REFA_LDA)
+total_days <- n_distinct(validations$JOUR)
+global_daily_avg <- total_ridership / total_days
+
+# Create summary table
+summary_stats <- data.frame(
+  Metric = c("Total Ridership", "Active Stations", "Days Recorded", "Average Daily Ridership", "Date Range"),
+  Value = c(
+    format(total_ridership, big.mark = ","),
+    format(total_stations, big.mark = ","),
+    format(total_days, big.mark = ","),
+    format(round(global_daily_avg), big.mark = ","),
+    paste(min(validations$JOUR), "to", max(validations$JOUR))
+  )
+)
+
+kable(summary_stats, 
+      caption = "Network-Wide Ridership Statistics",
+      col.names = c("Metric", "Value")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## 2.2 Holiday vs. Normal Day Analysis
+
+Ridership patterns differ significantly between holidays and normal days:
+
+```{r holiday-comparison}
+#| label: holiday-comparison-plot
+#| fig-cap: "Distribution of daily validations: holidays vs. normal days"
+#| fig-width: 8
+#| fig-height: 5
+#| fig-asp: 0.6
+#| 
+validations = read_parquet("validations.parquet")
+
+tot_val_per_day <- validations |>
+  group_by(JOUR) |>
+  summarise(NB_VALD=sum(NB_VALD), is_holiday=first(is_holiday))
+
+avg_vals <- tot_val_per_day %>%
+  group_by(is_holiday) %>%
+  summarise(mean_val = mean(NB_VALD, na.rm = TRUE))
+
+
+ggplot(tot_val_per_day, aes(x = is_holiday, y = NB_VALD, fill = is_holiday)) +
+  geom_boxplot(show.legend = FALSE) +
+  labs(
+    title = "Validation Distribution: Holidays vs Normal Days",
+    x = "",
+    y = "Validation Count"
+  ) +
+  theme_minimal()
+```
+
+**Interpretation**: Normal days show significantly higher and more consistent ridership compared to holidays, which exhibit lower ridership with greater variability. This reflects reduced commuter traffic during holidays.
+
+## 2.3 Weekday Patterns
+
+```{r weekday-analysis}
+#| label: weekday-patterns
+#| fig-cap: "Average ridership by day of week (excluding holidays)"
+
+weekday_stats <- validations %>%
+  filter(is_holiday == "Normal Day") %>%
+  # sum per day first
+  group_by(JOUR, day_of_week) %>%
+  summarise(daily_total = sum(NB_VALD, na.rm = TRUE), .groups = "drop") %>%
+  # then average across weekdays
+  group_by(day_of_week) %>%
+  summarise(
+    avg_daily_val = mean(daily_total, na.rm = TRUE),
+    total_val = sum(daily_total, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(avg_daily_val))
+
+ggplot(weekday_stats, aes(x = reorder(day_of_week, -avg_daily_val), y = avg_daily_val)) +
+    geom_col(fill = "darkblue") +
+    geom_text(aes(label = round(avg_daily_val, 0)), vjust = -0.5, size = 3.5) +
+    scale_y_continuous(labels = scales::comma) +
+    labs(
+        title = "Average Traffic by Day of Week",
+        subtitle = "Excluding Holidays",
+        x = "Day",
+        y = "Average Validations"
+    ) +
+    theme_minimal()
+```
+
+**Key Observations**:
+
+- Weekdays (Monday-Friday) show consistently high ridership
+- Weekend ridership (Saturday-Sunday) is significantly lower, reflecting reduced commuter activity
+
+## 2.4 Ridership by Transport Mode
+
+```{r mode-analysis}
+#| label: transport-mode-analysis
+#| fig-cap: "Total validations by transport mode"
+
+# Prepare station type data
+zd_clean <- zd %>%
+  mutate(
+    idrefa_lda = as.character(idrefa_lda),
+    idrefa_lda = sub("\\.0$", "", idrefa_lda)
+  )
+
+zd_lookup <- zd_clean %>%
+  st_drop_geometry() %>%
+  select(idrefa_lda, type_arret) %>%
+  distinct(idrefa_lda, .keep_all = TRUE)
+
+# Join with validations
+val_joined <- validations %>%
+  left_join(zd_lookup, by = c("ID_REFA_LDA" = "idrefa_lda"))
+
+# Aggregate by mode
+mode_summary <- val_joined %>%
+  filter(!is.na(type_arret)) %>%
+  group_by(type_arret) %>%
+  summarise(total_val = sum(NB_VALD, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(total_val))
+
+# Plot
+ggplot(mode_summary, aes(x = reorder(type_arret, -total_val), y = total_val, fill = type_arret)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_continuous(labels = comma) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "Total Ridership by Transport Mode",
+    x = "Transport Mode",
+    y = "Total Validations (2018-2025)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## 2.5 Ticket Category Analysis
+
+```{r ticket-analysis}
+#| label: ticket-category-weekday
+#| fig-cap: "Average validations by weekday and ticket category"
+validations = read_parquet("validations.parquet")
+daily_totals <- validations %>%
+  group_by(JOUR, day_of_week, CATEGORIE_TITRE) %>%
+  summarise(total_val = sum(NB_VALD, na.rm = TRUE), .groups = "drop")
+
+val_summary <- daily_totals %>%
+  group_by(day_of_week, CATEGORIE_TITRE) %>%
+  summarise(mean_val = mean(total_val, na.rm = TRUE), .groups = "drop")
+
+ggplot(val_summary, aes(x = day_of_week, y = mean_val, fill = CATEGORIE_TITRE)) +
+  geom_col(position = "dodge") +
+  labs(
+    title = "Average Validations by Weekday and Category",
+    x = "Day of Week",
+    y = "Average Validations",
+    fill = "Category"
+  ) +
+  theme_minimal()
+
+```
+
+---
+
+# 3. Temporal Analysis
+
+## 3.1 Weekly Evolution
+
+```{r weekly-evolution}
+#| label: weekly-trend
+#| fig-cap: "Weekly total validations over time with seasonal highlights"
+#| fig-height: 7
+
+# Calculate weekly totals
+weekly_validations <- validations %>%
+  group_by(week = floor_date(JOUR, unit = "week")) %>%
+  summarise(total_validations = sum(NB_VALD, na.rm = TRUE), .groups = "drop") %>%
+  filter(week != min(week) & week != max(week))  # Remove incomplete weeks
+
+# Define summer breaks (Zone C)
+summer_breaks <- data.frame(
+  start = as.Date(c("2018-07-06", "2019-07-06", "2020-07-04", "2021-07-03", 
+                    "2022-07-07", "2023-07-08", "2024-07-06")),
+  end   = as.Date(c("2018-09-02", "2019-09-02", "2020-09-01", "2021-09-02", 
+                    "2022-09-01", "2023-09-04", "2024-09-02"))
+)
+
+# Define holiday weeks
+holiday_dates <- as.Date(c(
+  "2018-10-20","2019-10-19","2020-10-17","2021-10-23","2022-10-22","2023-10-21",  # Toussaint
+  "2018-12-22","2019-12-21","2020-12-19","2021-12-18","2022-12-17","2023-12-23",  # Christmas
+  "2019-02-23","2020-02-08","2021-02-13","2022-02-19","2023-02-18","2024-02-10",  # Winter
+  "2019-04-20","2020-04-04","2021-04-17","2022-04-23","2023-04-22","2024-04-06"   # Spring
+))
+
+# Interpolate for holiday points
+all_dates <- data.frame(date = seq(min(weekly_validations$week), 
+                                    max(weekly_validations$week), by = "day"))
+all_dates <- all_dates %>%
+  left_join(weekly_validations %>% rename(date = week), by = "date") %>%
+  arrange(date) %>%
+  mutate(total_validations = zoo::na.approx(total_validations, na.rm = FALSE))
+
+holiday_points <- all_dates %>%
+  filter(date %in% holiday_dates)
+
+# Plot
+ggplot(weekly_validations, aes(x = week, y = total_validations)) +
+  geom_rect(data = summer_breaks,
+            inherit.aes = FALSE,
+            aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf),
+            fill = "lightblue", alpha = 0.3) +
+  geom_line(color = "#2C3E50", linewidth = 0.9) +
+  geom_point(data = holiday_points,
+             aes(x = date, y = total_validations),
+             color = "red", size = 2.5, alpha = 0.7) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "Weekly Total Validations (2018-2025)",
+    subtitle = "Blue shaded areas = summer breaks | Red points = school holidays",
+    x = "Week",
+    y = "Total Validations"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+**Key Observations**:
+
+- Clear annual cyclical pattern with dips during summer breaks
+- Dramatic decline during COVID-19 lockdowns (March 2020 - mid-2021)
+- Gradual recovery starting in mid-2021
+- Holiday periods consistently show reduced ridership
+- Return to near pre-pandemic levels by 2023
+
+## 3.2 Monthly Trends and COVID-19 Impact
+
+```{r monthly-trends}
+#| label: monthly-covid-analysis
+#| fig-cap: "Monthly validations showing COVID-19 impact"
+
+# Calculate monthly totals
+df_month <- validations %>%
+  mutate(
+    date = as.Date(JOUR),
+    year_month = floor_date(date, unit = "month")
+  ) %>%
+  group_by(year_month) %>%
+  summarise(NB_VALD = sum(NB_VALD, na.rm = TRUE), .groups = "drop")
+
+# Calculate mean (excluding COVID period for baseline)
+covid_start <- as.Date("2020-03-01")
+covid_end   <- as.Date("2022-06-30")
+
+mean_val_pre_covid <- df_month %>%
+  filter(year_month < covid_start) %>%
+  summarise(mean = mean(NB_VALD)) %>%
+  pull(mean)
+
+# Plot
+ggplot(df_month, aes(x = year_month, y = NB_VALD)) +
+  geom_rect(aes(xmin = covid_start, xmax = covid_end,
+                ymin = -Inf, ymax = Inf),
+            inherit.aes = FALSE, fill = "red", alpha = 0.2) +
+  geom_area(fill = "#3498DB", alpha = 0.6) +
+  geom_hline(yintercept = mean_val_pre_covid, 
+             linetype = "dashed", linewidth = 0.8, color = "darkred") +
+  scale_y_continuous(labels = comma) +
+  annotate("text", x = as.Date("2021-01-01"), y = mean_val_pre_covid * 1.1,
+           label = "Pre-COVID Average", color = "darkred", fontface = "bold") +
+  labs(
+    title = "Monthly Validations Over Time",
+    subtitle = "Red shaded area = COVID-19 period | Dashed line = pre-COVID average",
+    x = "Month",
+    y = "Total Validations"
+  ) +
+  theme_classic(base_size = 12)
+```
+
+## 3.3 Seasonal Analysis
+
+```{r seasonal-analysis}
+#| label: seasonal-patterns
+#| fig-cap: "Validations by season and year with annual mean"
+
+# Create seasonal aggregation
+df_season <- validations %>%
+  mutate(
+    date = as.Date(JOUR),
+    year = year(date),
+    md = month(date) * 100 + day(date),
+    season = case_when(
+      md >= 322 & md < 621 ~ "Spring",   # Mar 22 - Jun 20
+      md >= 621 & md < 923 ~ "Summer",   # Jun 21 - Sep 22
+      md >= 923 & md < 1222 ~ "Fall",    # Sep 23 - Dec 21
+      TRUE ~ "Winter"                     # Dec 22 - Mar 21
+    )
+  ) %>%
+  group_by(year, season) %>%
+  summarise(NB_VALD = sum(NB_VALD, na.rm = TRUE), .groups = "drop") %>%
+  mutate(season = factor(season, levels = c("Spring", "Summer", "Fall", "Winter")))
+
+# Calculate annual means
+df_mean_year <- df_season %>%
+  group_by(year) %>%
+  summarise(mean_year = mean(NB_VALD, na.rm = TRUE), .groups = "drop")
+
+# Plot
+ggplot(df_season, aes(x = factor(year), y = NB_VALD, fill = season)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_line(
+    data = df_mean_year,
+    aes(x = factor(year), y = mean_year, group = 1),
+    inherit.aes = FALSE,
+    linewidth = 1,
+    color = "black"
+  ) +
+  geom_point(
+    data = df_mean_year,
+    aes(x = factor(year), y = mean_year),
+    inherit.aes = FALSE,
+    size = 3,
+    color = "black"
+  ) +
+  scale_y_continuous(labels = comma) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "Validations by Season and Year",
+    subtitle = "Black line shows annual average",
+    x = "Year",
+    y = "Total Validations",
+    fill = "Season"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+---
+
+# 4. Spatial Analysis
+
+## 4.1 Top 30 Busiest Stations
+
+```{r top-stations}
+#| label: top-stations-chart
+#| fig-cap: "Top 30 stations by average daily validations"
+#| fig-height: 8
+
+# Calculate station averages
+station_avg <- validations %>%
+  group_by(ID_REFA_LDA, JOUR) %>%
+  summarise(daily_val = sum(NB_VALD, na.rm = TRUE), .groups = "drop") %>%
+  group_by(ID_REFA_LDA) %>%
+  summarise(avg_daily_validations = mean(daily_val, na.rm = TRUE), .groups = "drop")
+
+# Join with station names
+zd_names <- zd %>%
+  st_drop_geometry() %>%
+  select(idrefa_lda, nom_lda = nom) %>%
+  distinct(idrefa_lda, .keep_all = TRUE)
+
+station_avg <- station_avg %>%
+  left_join(zd_names, by = c("ID_REFA_LDA" = "idrefa_lda")) %>%
+  arrange(desc(avg_daily_validations)) %>%
+  slice_head(n = 30)
+
+# Plot
+ggplot(station_avg, aes(x = reorder(nom_lda, avg_daily_validations), 
+                        y = avg_daily_validations)) +
+  geom_col(fill = "#3498DB") +
+  coord_flip() +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "Top 30 Stations by Average Daily Validations",
+    subtitle = "Île-de-France Network (2018-2025)",
+    x = NULL,
+    y = "Average Daily Validations"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.y = element_text(size = 9))
+```
+
+## 4.2 Geographic Distribution of Ridership
+
+```{r geographic-map}
+#| label: hexagonal-heatmap
+#| fig-cap: "Hexagonal heatmap of average daily validations"
+#| fig-height: 8
+#| fig-width: 10
+
+# Calculate average validations per station
+daily_validations <- validations %>%
+  group_by(ID_REFA_LDA, JOUR) %>%
+  summarise(daily_val = sum(NB_VALD, na.rm = TRUE), .groups = "drop")
+
+avg_validations_zone <- daily_validations %>%
+  group_by(ID_REFA_LDA) %>%
+  summarise(avg_validations = mean(daily_val, na.rm = TRUE), .groups = "drop")
+
+# Join with geographic data
+zd_with_validation <- left_join(
+  zd,
+  avg_validations_zone,
+  by = c("idrefa_lda" = "ID_REFA_LDA")
+)
+
+zd_filtered <- zd_with_validation %>%
+  filter(!is.na(avg_validations))
+
+# Create hexagonal grid (2km cells)
+hex_grid_geom <- st_make_grid(zd_filtered, cellsize = c(2000, 2000), 
+                               what = "polygons", square = FALSE)
+hex_grid <- st_sf(hex_id = 1:length(hex_grid_geom), geometry = hex_grid_geom)
+
+# Aggregate to hexagonal grid
+hex_validation <- st_join(hex_grid, zd_filtered) %>%
+  group_by(hex_id) %>%
+  summarise(
+    avg_validations = mean(avg_validations, na.rm = TRUE),
+    n_stations = sum(!is.na(avg_validations)),
+    .groups = "drop"
+  ) %>%
+  filter(n_stations > 0)
+
+# Plot
+ggplot() +
+  geom_sf(data = hex_validation, aes(fill = avg_validations), 
+          color = NA, alpha = 0.8) +
+  scale_fill_viridis_c(
+    option = "plasma",
+    name = "Avg Daily\nValidations",
+    labels = comma,
+    trans = "log10",
+    breaks = c(10, 100, 1000, 10000)
+  ) +
+  labs(
+    title = "Average Daily Validations - Île-de-France Transit Network",
+    subtitle = "Hexagonal aggregation (2km cells) | 2018-2025"
+  ) +
+  theme_void(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5, margin = margin(b = 5)),
+    plot.subtitle = element_text(size = 11, hjust = 0.5, color = "grey40", margin = margin(b = 10)),
+    legend.position = "right",
+    legend.title = element_text(size = 10, face = "bold"),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+```
+
+**Spatial Insights**:
+
+- Major transit hubs (Gare du Nord, Gare de Lyon, Saint-Lazare) show exceptional activity and alongside RER lines
+- Ridership decreases with distance from city center
+- Secondary clusters visible in La Défense and other business districts
+
+---
+
+# 5. Definition and Analysis of "The Norm"
+
+## 5.1 Establishing the Baseline
+
+The "norm" represents typical ridership patterns during regular operational conditions. We define it as:
+
+- **Period**: All normal (non-holiday) days
+- **Exclusions**: 
+  - Public holidays
+  - COVID-19 period (March 2020 - June 2022)
+
+```{r compute-norm}
+#| label: compute-norm
+validations = read_parquet("validations.parquet")
+# Define COVID period
+covid_start <- as.Date("2020-03-01")
+covid_end <- as.Date("2022-06-30")
+
+# Filter for norm calculation
+norm_data <- validations %>%
+  filter(
+    is_holiday == "Normal Day",
+    !(JOUR >= covid_start & JOUR <= covid_end)
+  )
+
+# Calculate daily network totals
+norm_daily_totals <- norm_data %>%
+  group_by(JOUR, day_of_week) %>%
+  summarise(daily_total = sum(NB_VALD, na.rm = TRUE), .groups = "drop")
+
+# Calculate norm by weekday
+
+norm_by_weekday <- norm_daily_totals %>%
+  group_by(day_of_week) %>%
+  summarise(
+    norm_avg = mean(daily_total, na.rm = TRUE),
+    norm_sd  = sd(daily_total, na.rm = TRUE),
+    n_days   = n(),
+    .groups  = "drop"
+  )
+
+# Display table
+kable(norm_by_weekday, 
+      caption = "The Norm: Average Daily Validations by Weekday",
+      col.names = c("Weekday", "Average", "Std. Dev.", "Days Sampled"),
+      digits = 0,
+      format.args = list(big.mark = ",")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## 5.2 Visualizing the Norm
+
+```{r norm-visualization}
+#| label: norm-plot
+#| fig-cap: "The Norm: Expected ridership by weekday with variability"
+
+ggplot(norm_by_weekday, aes(x = day_of_week, y = norm_avg)) +
+  geom_col(fill = "darkblue", alpha = 0.7) +
+  geom_errorbar(aes(ymin = norm_avg - norm_sd, ymax = norm_avg + norm_sd), 
+                width = 0.3, color = "red", linewidth = 1) +
+  geom_text(aes(label = format(round(norm_avg), big.mark = ","
+  )),
+            vjust = -0.5, fontface = "bold") +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.15))) +
+  labs(
+    title = "THE NORM - Average Ridership by Weekday",
+    subtitle = "Error bars show ± 1 standard deviation | Excludes holidays and COVID period",
+    x = "Day of Week",
+    y = "Average Daily Validations"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+---
+
+# 6. Statistical Methods and Validation
+
+
+---
+
+# 7. Interactive Dashboard Development
+
+## 7.1 Dashboard Architecture
+
+We have developed an interactive Shiny dashboard deployed on shinyapps.io that enables to:
+
+1. **Compare periods against the norm**: Select any time period and visualize deviations from expected ridership
+2. **Compare two arbitrary periods**: Analyze differences between reference and comparison periods
+3. **Explore individual stations**: Deep dive into station-specific trends and patterns
+4. **Monitor overall trends**: Track network-wide evolution over time
+
+## 7.2 Data Preprocessing for Dashboard
+
+To optimize performance and memory usage, we pre-aggregate the data:
+
+```{r dashboard-preprocessing}
+#| label: dashboard-data-prep
+#| eval: false
+#| code-fold: false
+
+# This code is from preprocessing.R
+
+# 1. Network-wide daily aggregates
+daily_network <- validations %>%
+  group_by(JOUR, day_of_week, is_holiday) %>%
+  summarise(NB_VALD = sum(NB_VALD, na.rm = TRUE), .groups = "drop")
+
+write_parquet(daily_network, "ShinyApp/data/pre_aggregated/daily_network.parquet")
+
+# 2. Station-level daily data
+station_daily <- validations %>%
+  group_by(JOUR, day_of_week, nom_lda, type_arret, CATEGORIE_TITRE) %>%
+  summarise(total_validations = sum(NB_VALD, na.rm = TRUE), .groups = "drop")
+
+write_parquet(station_daily, "ShinyApp/data/pre_aggregated/station_daily.parquet")
+
+# 3. Station metadata
+station_metadata <- validations %>%
+  group_by(ID_REFA_LDA, nom_lda, type_arret) %>%
+  summarise(
+    total_validations = sum(NB_VALD, na.rm = TRUE),
+    avg_daily = mean(NB_VALD, na.rm = TRUE),
+    min_date = min(JOUR),
+    max_date = max(JOUR),
+    .groups = "drop"
+  )
+
+write_parquet(station_metadata, "ShinyApp/data/pre_aggregated/station_metadata.parquet")
+
+# 4. Weekly and mode aggregates
+weekly_network <- validations %>%
+  mutate(week = floor_date(JOUR, "week")) %>%
+  group_by(week) %>%
+  summarise(total = sum(NB_VALD, na.rm = TRUE), .groups = "drop")
+
+write_parquet(weekly_network, "ShinyApp/data/pre_aggregated/weekly_network.parquet")
+```
+
+## 7.3 Dashboard Access
+
+**Live Dashboard URL**: https://datavizprojectsia.shinyapps.io/RailwayApp/
+
+The dashboard provides four main tabs:
+
+1. **Compare with Norm**: Evaluate recent ridership against historical baseline
+2. **Period Comparison**: Compare any two time periods side-by-side
+3. **Station Explorer**: Detailed analysis of individual station performance
+4. **Overall Trends**: Network-wide evolution and rankings
+
+## 7.4 Dashboard Usage Examples
+
+### Example 1: Identifying Unusual Patterns
+
+Users can select the past 30 days and immediately see whether ridership is above or below expected levels for each weekday, with percentage deviations clearly displayed.
+
+### Example 2: Station Performance Monitoring
+
+Transportation planners can select a specific station and view:
+
+- Weekly ridership trends with smoothed averages
+- Average ridership by day of week
+- Breakdown by ticket category
+- Key statistics (total validations, date range, transport mode)
+
+### Example 3: Recovery Analysis
+
+By comparing Q4 2019 (pre-pandemic) with Q4 2023 (post-recovery), we can quantify the extent of recovery and identify any lasting changes in travel patterns.
+
+---
+
+# 8. Key Findings and Insights
+
+## 8.1 Network Performance Summary
+
+- **Total ridership (2018-2025)**: `r format(total_ridership, big.mark = ",")` validations
+- **Average daily ridership**: `r format(round(global_daily_avg), big.mark = ",")` validations
+- **Most active station**: `r station_avg$nom_lda[1]` (avg. `r format(round(station_avg$avg_daily_validations[1]), big.mark = ",")` daily validations)
+
+## 8.2 COVID-19 Impact Assessment
+
+```{r covid-impact-summary}
+#| label: covid-summary
+
+daily_network <- validations %>%
+  group_by(JOUR, day_of_week, is_holiday) %>%
+  summarise(NB_VALD = sum(NB_VALD, na.rm = TRUE), .groups = "drop")
+
+# Pre-COVID average
+pre_covid_avg <- daily_network %>%
+  filter(JOUR < covid_start) %>%
+  summarise(avg = mean(NB_VALD, na.rm = TRUE)) %>%
+  pull(avg)
+
+# During COVID (lowest point)
+covid_lowest <- daily_network %>%
+  filter(JOUR >= covid_start & JOUR <= covid_end) %>%
+  summarise(min = min(NB_VALD, na.rm = TRUE)) %>%
+  pull(min)
+
+# Recent average (2024)
+recent_avg <- daily_network %>%
+  filter(year(JOUR) == 2024) %>%
+  summarise(avg = mean(NB_VALD, na.rm = TRUE)) %>%
+  pull(avg)
+
+# Calculate reductions
+max_reduction <- round((1 - covid_lowest / pre_covid_avg) * 100, 1)
+current_recovery <- round(recent_avg / pre_covid_avg * 100, 1)
+
+cat("Pre-COVID average daily ridership:", format(round(pre_covid_avg), big.mark = ","), "\n")
+cat("Lowest point during COVID:", format(round(covid_lowest), big.mark = ","), 
+    "(", max_reduction, "% reduction)\n")
+cat("2024 average daily ridership:", format(round(recent_avg), big.mark = ","), "\n")
+cat("Current recovery rate:", current_recovery, "% of pre-COVID levels\n")
+```
+
+**Major Insights**:
+
+1. Ridership dropped by approximately `r max_reduction`% at the pandemic's peak
+2. Recovery has been gradual but steady since mid-2021
+3. As of 2024, ridership has recovered to `r current_recovery`% of pre-pandemic levels
+4. The recovery is not uniform across all stations or transport modes
+
+## 8.3 Seasonal and Temporal Patterns
+
+- **Weekend effect**: Saturday and Sunday show a much lower ridership than weekdays
+- **Summer effect**: July-August period shows significant ridership decrease
+- **Holiday impact**: Public holidays experience a reduction in ridership
+- **School breaks**: Clear dips during vacation periods (February, April, October, December)
+
+## 8.4 Spatial Concentration
+
+- **Top 10 stations** account for approximately `r round(sum(head(station_avg$avg_daily_validations, 10)) / sum(station_avg$avg_daily_validations) * 100, 1)`% of network ridership
+- **Major hubs** (Gare du Nord, Saint-Lazare, Châtelet) remain critical connection points
+---
+
+# Appendix A: Code Repository
+
+All analysis code is available in the project repository: https://github.com/BoxingBytes/Data_visualization
+
+- `cleaning.R`: Data collection, cleaning, and preprocessing
+- `eda.R`: Exploratory data analysis and visualization
+- `preprocessing.R`: Pre-aggregation for Shiny dashboard
+- `ShinyApp/app.R`: Interactive dashboard code
+- `report.qmd`: This Quarto report
+
+## Reproducibility
+
+To reproduce this analysis:
+
+1. Download raw data files from STIF portal
+2. Run `cleaning.R` to generate `validations.parquet` and `zd.shp`
+3. Run `eda.R` for exploratory visualizations
+4. Run `preprocessing.R` to create dashboard data files
+5. Render `report.qmd` to generate this report
+6. Deploy `ShinyApp/` to shinyapps.io
+
+---
+
+# Session Information
+
+```{r session-info}
+#| label: session-info
+
+sessionInfo()
+```
+
+---
+
+**Report generated on**: `r format(Sys.Date(), "%B %d, %Y")`
+
+**Group members**: MOURA Pedro, DUCHINSKI Marcos, AGUIRRE Max

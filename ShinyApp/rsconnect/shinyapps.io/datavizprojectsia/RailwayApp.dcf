@@ -1,0 +1,13 @@
+name: RailwayApp
+title: RailwayApp
+username: datavizprojectsia
+account: datavizprojectsia
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 16317637
+bundleId: 11327872
+url: https://datavizprojectsia.shinyapps.io/RailwayApp/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: .Rprofile
