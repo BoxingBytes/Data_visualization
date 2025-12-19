@@ -583,7 +583,7 @@ server <- function(input, output, session) {
       `Peak Volume` = format(round(peak_val, 0), big.mark=","),
       `Peak Date` = as.character(peak_date),
       `Total Volume` = format(round(total_vol, 0), big.mark=","),
-      `Vs. History` = paste0(round(growth_pct, 1), "%"),
+      `Vs. History (60 Days)` = paste0(round(growth_pct, 1), "%"),
       `Scenarios` = ifelse(input$apply_remote_friday || input$apply_event, "Active", "None"),
       check.names = FALSE 
     )

@@ -692,6 +692,41 @@ ggplot(norm_by_weekday, aes(x = day_of_week, y = norm_avg)) +
 
 # 6. Statistical Methods and Validation
 
+As proposed in the project statement, we have developed an interactive prediction component allowing the forecast of ridership in the network.
+
+To do that, we proposed the following features:
+
+- Linear Model trained on post-covid data to predict the ridership for $N$ user-defined days
+- Parametrization for growth adjustment
+- Custom Scenarios as:
+    - Friday Ridership Drop
+    - Special Event with user-defined growth factor and schedule
+- Key insights in the impact, as: Daily Average, Peak Volume, Peak Dates, Total Volume, and others.
+
+This model, is available on the section "Advanced Forecast Model" of the dashboard
+
+The linear model, consists on the following structure:
+```{r dashboard-preprocessing}
+#| label: linear-model
+#| eval: false
+#| code-fold: false
+
+  trained_model <- reactive({
+    train_df <- daily_network %>%
+      filter(JOUR > as.Date("2022-07-01")) %>%
+      mutate(
+        time_index = as.numeric(JOUR - min(JOUR)),
+        day_num = as.factor(lubridate::wday(JOUR, week_start = 1)),
+        month_num = as.factor(lubridate::month(JOUR)),
+        is_holiday = as.factor(as.character(is_holiday))
+      )
+    lm(NB_VALD ~ time_index + day_num + month_num + is_holiday, data = train_df)
+  })
+
+
+
+```
+
 
 ---
 
@@ -757,12 +792,13 @@ write_parquet(weekly_network, "ShinyApp/data/pre_aggregated/weekly_network.parqu
 
 **Live Dashboard URL**: https://datavizprojectsia.shinyapps.io/RailwayApp/
 
-The dashboard provides four main tabs:
+The dashboard provides five main tabs:
 
 1. **Compare with Norm**: Evaluate recent ridership against historical baseline
 2. **Period Comparison**: Compare any two time periods side-by-side
 3. **Station Explorer**: Detailed analysis of individual station performance
 4. **Overall Trends**: Network-wide evolution and rankings
+5. **Advanced Forecast Model**: Linear Model to predict and customize Ridership for the next $N$ days
 
 ## 7.4 Dashboard Usage Examples
 
@@ -782,6 +818,10 @@ Transportation planners can select a specific station and view:
 ### Example 3: Recovery Analysis
 
 By comparing Q4 2019 (pre-pandemic) with Q4 2023 (post-recovery), we can quantify the extent of recovery and identify any lasting changes in travel patterns.
+
+### Example 4: Forecast for a major Event
+
+As a stakeholder, this dashboard brings the possibility to predict key insights about the next $N$ days. In the case of a scheduled event, it is possible to predict the impact in the transportation network, based on the predicted growth in a determined date interval range. This, allows the possibility to take conclusions about congestion, and possible preventive measures to be taken.
 
 ---
 
