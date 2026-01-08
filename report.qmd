@@ -740,6 +740,7 @@ We have developed an interactive Shiny dashboard deployed on shinyapps.io that e
 2. **Compare two arbitrary periods**: Analyze differences between reference and comparison periods
 3. **Explore individual stations**: Deep dive into station-specific trends and patterns
 4. **Monitor overall trends**: Track network-wide evolution over time
+5. **Advanced Forecast Model**: Predict and customize Ridership for the next $N$ days
 
 ## 7.2 Data Preprocessing for Dashboard
 
