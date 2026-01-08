@@ -5,10 +5,43 @@ library(arrow)
 library(lubridate)
 library(scales)
 library(DT)
+library(leaflet)
+library(sf)
 
 # -------------------------------
 # Load ONLY pre-aggregated data (NO full validations dataset)
 # -------------------------------
+
+# Load data
+validations <- read_parquet("data/validations_sample.parquet")
+zd <- st_read("data/zd.shp", quiet = TRUE)
+
+# Prepare zd lookup
+zd <- zd %>%
+  mutate(
+    idrefa_lda = as.character(idrefa_lda),
+    idrefa_lda = sub("\\.0$", "", idrefa_lda)
+  )
+
+zd_lookup <- zd %>%
+  st_drop_geometry() %>%
+  select(idrefa_lda, type_arret, nom_lda) %>%
+  distinct(idrefa_lda, .keep_all = TRUE)
+
+# Join validations with station info
+validations <- validations %>%
+  left_join(zd_lookup, by = c("ID_REFA_LDA" = "idrefa_lda"))
+
+# Check and transform CRS for leaflet - was a bug for openstreetmap display
+if(!is.na(st_crs(zd)) && st_crs(zd)$epsg != 4326) {
+  zd_wgs84 <- st_transform(zd, 4326)
+} else if(is.na(st_crs(zd))) {
+  st_crs(zd) <- 2154  # Assume Lambert 93
+  zd_wgs84 <- st_transform(zd, 4326)
+} else {
+  zd_wgs84 <- zd
+}
+
 daily_network <- read_parquet("data/pre_aggregated/daily_network.parquet")
 station_daily <- read_parquet("data/pre_aggregated/station_daily.parquet")
 station_metadata <- read_parquet("data/pre_aggregated/station_metadata.parquet")
@@ -131,11 +164,12 @@ ui <- fluidPage(
                       )
                ),
                column(8,
-                      h4("Station Ridership Trends (Plots)")
+                      leafletOutput("station_map", height = "500px")
                )
              ),
              fluidRow(
                column(12,
+                      h3("Station Ridership Trends"),
                       plotOutput("station_trend_plot", height = "400px")
                )
              ),
@@ -148,6 +182,7 @@ ui <- fluidPage(
                )
              )
     ),
+    
     
     tabPanel("Overall Trends",
              fluidRow(
@@ -324,6 +359,49 @@ server <- function(input, output, session) {
     bind_rows(ref, comp, diff) %>%
       datatable(options=list(dom='t', ordering=FALSE), rownames=FALSE) %>%
       formatCurrency(c("Total_Validations","Avg_Daily"), currency="", digits=0)
+  })
+  
+  output$station_map <- renderLeaflet({
+    leaflet(zd_wgs84) %>%
+      addTiles() %>%
+      addPolygons(
+        group = "stations",
+        color = "#4A90E2",
+        weight = 1,
+        fillOpacity = 0.3,
+        popup = ~nom_lda,
+        layerId = ~idrefa_lda,
+        highlightOptions = highlightOptions(
+          weight = 2,
+          color = "#FFD700",
+          bringToFront = TRUE
+        )
+      ) %>%
+      setView(lng = 2.35, lat = 48.85, zoom = 11)
+  })
+  
+  selected_station_sf <- reactive({
+    req(input$station_select)
+    
+    # Filter by name (nom_lda) because that's what the dropdown sends
+    zd_wgs84 %>%
+      dplyr::filter(nom_lda == input$station_select)
+  })
+  
+  observe({
+    req(selected_station_sf())
+    # Ensure there is actually a row found before trying to zoom
+    if(nrow(selected_station_sf()) > 0) {
+      bbox <- st_bbox(selected_station_sf())
+      
+      leafletProxy("station_map") %>%
+        fitBounds(
+          lng1 = as.numeric(bbox["xmin"]),
+          lat1 = as.numeric(bbox["ymin"]),
+          lng2 = as.numeric(bbox["xmax"]),
+          lat2 = as.numeric(bbox["ymax"])
+        )
+    }
   })
   
   # Weekday plots for reference and comparison
